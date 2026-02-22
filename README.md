@@ -1,5 +1,7 @@
 # xe-exporter
 
+![Grafana Dashboard](assets/usage.png)
+
 A high-performance Prometheus and OpenTelemetry exporter for Intel Arc GPUs (Battlemage and Alchemist) using the modern Linux `xe` kernel driver.
 
 ## Features
