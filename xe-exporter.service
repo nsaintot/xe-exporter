@@ -1,0 +1,12 @@
+[Unit]
+Description=Intel Arc B60 GPU Exporter
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/xe-exporter -prom-port 9101
+Restart=always
+User=root
+# Root is required to read from debugfs
+
+[Install]
+WantedBy=multi-user.target
