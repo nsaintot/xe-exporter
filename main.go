@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -38,6 +39,7 @@ type GPU struct {
 	VRAMs       []string
 	LastEnergy  float64
 	LastEnergyT time.Time
+	mu          sync.Mutex
 }
 
 func discoverGPUs() []*GPU {
@@ -136,6 +138,7 @@ func main() {
 	promPort := flag.String("prom-port", "9101", "Prometheus metrics port")
 	enableProm := flag.Bool("enable-prom", true, "Enable Prometheus /metrics endpoint")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP gRPC endpoint")
+	debug := flag.Bool("debug", false, "Enable verbose collection logging")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -173,7 +176,10 @@ func main() {
 	log.Printf("Discovered %d GPUs", len(gpus))
 
 	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		start := time.Now()
+		if *debug { log.Println("Metric collection started...") }
 		for _, gpu := range gpus {
+			gpu.mu.Lock()
 			cardAttr := attribute.String("card", gpu.ID)
 
 			// VRAM
@@ -239,7 +245,9 @@ func main() {
 					o.ObserveFloat64(fanGauge, float64(rpm), metric.WithAttributes(cardAttr, attribute.String("fan", fanID)))
 				}
 			}
+			gpu.mu.Unlock()
 		}
+		if *debug { log.Printf("Metric collection completed in %s", time.Since(start)) }
 		return nil
 	}, vramTotalGauge, vramUsedGauge, gtUsageGauge, freqActualGauge, freqRequestedGauge, powerGauge, fanGauge)
 

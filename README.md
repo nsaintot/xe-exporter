@@ -65,6 +65,7 @@ The following flags are available:
 - `-prom-port`: Port for Prometheus metrics (default: `9101`)
 - `-enable-prom`: Enable/disable Prometheus endpoint (default: `true`)
 - `-otlp-endpoint`: OTLP gRPC endpoint (e.g., `localhost:4317`)
+- `-debug`: Enable verbose collection logging (default: `false`)
 
 ## Prometheus Configuration
 
