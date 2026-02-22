@@ -43,17 +43,25 @@ sudo make setup-service
 
 ## Configuration
 
-The exporter supports the following flags:
+The exporter is configured via `/etc/default/xe-exporter`.
 
+To modify options like the Prometheus port or OTLP endpoint:
+
+1. Edit `/etc/default/xe-exporter`:
+```bash
+# /etc/default/xe-exporter
+XE_EXPORTER_OPTS="-prom-port 9101 -otlp-endpoint my-otel-collector:4317"
+```
+
+2. Restart the service:
+```bash
+sudo systemctl restart xe-exporter
+```
+
+The following flags are available:
 - `-prom-port`: Port for Prometheus metrics (default: `9101`)
 - `-enable-prom`: Enable/disable Prometheus endpoint (default: `true`)
 - `-otlp-endpoint`: OTLP gRPC endpoint (e.g., `localhost:4317`)
-- `-interval`: Data collection frequency (default: `2s`)
-
-To modify these, edit `/etc/systemd/system/xe-exporter.service`.
-
-## License
-MIT
 
 ## Prometheus Configuration
 
@@ -69,9 +77,12 @@ scrape_configs:
 
 ## OpenTelemetry Configuration (OTLP)
 
-If you prefer pushing metrics to an OTel Collector, enable the OTLP flag in the service file:
+If you prefer pushing metrics to an OTel Collector, enable the OTLP flag in the configuration file:
 
 ```bash
-# /etc/systemd/system/xe-exporter.service
-ExecStart=/usr/local/bin/xe-exporter -otlp-endpoint my-otel-collector:4317
+# /etc/default/xe-exporter
+XE_EXPORTER_OPTS="-otlp-endpoint my-otel-collector:4317"
 ```
+
+## License
+MIT

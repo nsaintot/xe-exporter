@@ -53,6 +53,9 @@ nfpms:
     contents:
       - src: xe-exporter.service
         dst: /lib/systemd/system/xe-exporter.service
+      - src: xe-exporter.default
+        dst: /etc/default/xe-exporter
+        type: config
     scripts:
       postinstall: scripts/postinstall.sh
       preremove: scripts/preremove.sh

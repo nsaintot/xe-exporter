@@ -1,0 +1,9 @@
+# /etc/default/xe-exporter
+
+# Port for Prometheus metrics
+# XE_EXPORTER_OPTS="-prom-port 9101"
+
+# To enable OTLP metrics, add the endpoint here:
+# XE_EXPORTER_OPTS="-prom-port 9101 -otlp-endpoint localhost:4317"
+
+XE_EXPORTER_OPTS="-prom-port 9101"
