@@ -1,92 +1,139 @@
 # xe-exporter
-This has been tested on a B60 only!
+
+> Tested on an Intel Arc B60.
 
 ![Grafana Dashboard](assets/usage.png)
 
-A high-performance Prometheus and OpenTelemetry exporter for Intel Arc GPUs (Battlemage and Alchemist) using the modern Linux `xe` kernel driver.
+A high-performance Prometheus and OpenTelemetry exporter for Intel Arc GPUs (Battlemage and Alchemist) using the modern Linux `xe` kernel driver and [XPU Manager](https://github.com/intel/xpumanager) via CGo.
 
 ## Features
 
 - **OTel Native:** Built using the OpenTelemetry Go SDK for unified metrics.
 - **Dual Export:** Supports both Prometheus (`/metrics` endpoint) and OTLP gRPC push.
-- **Real-time Monitoring:** Collects VRAM, frequency, power, fan speeds, and GPU utilization.
-- **Systemd Ready:** Includes a pre-configured service file for easy deployment.
+- **Rich Telemetry:** Utilization, EU array state, per-engine breakdown, power, frequency, temperature, memory, Xe-Link throughput, and RAS error counters.
+- **Container Ready:** Rootless image published to GHCR.
+
+## Quick Start (container)
+
+```bash
+docker pull ghcr.io/nsaintot/xe-exporter:latest
+
+docker run -d --name xe-exporter \
+  --device /dev/dri \
+  --cap-add SYS_ADMIN \
+  -v /sys/kernel/debug:/sys/kernel/debug:ro \
+  -p 9101:9101 \
+  ghcr.io/nsaintot/xe-exporter:latest
+```
+
+| Flag / mount | Why it's needed |
+|---|---|
+| `--device /dev/dri` | Exposes the GPU render and card nodes to the container |
+| `--cap-add SYS_ADMIN` | Required by XPU Manager / Level Zero Sysman for perf counters |
+| `-v /sys/kernel/debug:/sys/kernel/debug:ro` | EU array & engine metrics read from debugfs |
+| `-p 9101:9101` | Prometheus scrape port |
 
 ## Metrics
 
-| Metric Name | Description | Labels |
-| ----------- | ----------- | ------ |
-| `xe_gpu_vram_total_bytes` | Total VRAM capacity | `card`, `vram` |
-| `xe_gpu_vram_used_bytes` | Current VRAM allocation | `card`, `vram` |
-| `xe_gpu_gt_usage_percent` | GPU GT utilization percent | `card`, `gt` |
-| `xe_gpu_frequency_actual_mhz` | Actual clock speed | `card`, `gt` |
-| `xe_gpu_frequency_requested_mhz` | Requested clock speed | `card`, `gt` |
-| `xe_gpu_power_watts` | Power draw (card/package) | `card`, `type` |
-| `xe_gpu_fan_rpm` | Fan speed | `card`, `fan` |
+All metrics carry the labels `gpu_id`, `gpu_uuid`, and `gpu_name`.
+
+### Utilization
+
+| Metric | Description |
+|---|---|
+| `xe_gpu_utilization_percent` | Overall GPU utilization |
+| `xe_gpu_eu_active_percent` | EU array: active (doing work) |
+| `xe_gpu_eu_stall_percent` | EU array: stalled (waiting on memory/dependency) |
+| `xe_gpu_eu_idle_percent` | EU array: idle (no work assigned) |
+| `xe_gpu_engine_util_percent` | Per-engine utilization — extra labels: `engine_type` (`compute`, `render`, `media`, `decoder`, `encoder`, `copy`), `engine_index` |
+
+### Power & Frequency
+
+| Metric | Description |
+|---|---|
+| `xe_gpu_power_watts` | Power draw in Watts |
+| `xe_gpu_frequency_gpu_mhz` | GPU core clock in MHz |
+| `xe_gpu_frequency_media_mhz` | Media engine clock in MHz |
+
+### Temperature
+
+| Metric | Description |
+|---|---|
+| `xe_gpu_temperature_core_celsius` | GPU core temperature in °C |
+| `xe_gpu_temperature_memory_celsius` | Memory temperature in °C |
+
+### Memory
+
+| Metric | Description |
+|---|---|
+| `xe_gpu_memory_used_mebibytes` | VRAM used in MiB |
+| `xe_gpu_memory_util_percent` | VRAM utilization in percent |
+| `xe_gpu_memory_bandwidth_util_percent` | Memory bandwidth utilization in percent |
+| `xe_gpu_memory_read_kbytes_per_second` | Memory read throughput in kB/s |
+| `xe_gpu_memory_write_kbytes_per_second` | Memory write throughput in kB/s |
+
+### Fabric
+
+| Metric | Description |
+|---|---|
+| `xe_gpu_xelink_throughput_kbytes_per_second` | Xe-Link combined throughput in kB/s |
+
+### RAS Error Counters (monotonically increasing)
+
+| Metric | Description |
+|---|---|
+| `xe_gpu_errors_reset_total` | GPU resets |
+| `xe_gpu_errors_programming_total` | Programming errors |
+| `xe_gpu_errors_driver_total` | Driver errors |
+| `xe_gpu_errors_cache_correctable_total` | Correctable cache errors |
+| `xe_gpu_errors_cache_uncorrectable_total` | Uncorrectable cache errors |
+| `xe_gpu_errors_memory_correctable_total` | Correctable memory errors |
+| `xe_gpu_errors_memory_uncorrectable_total` | Uncorrectable memory errors |
 
 ## Requirements
 
-- **Linux Kernel 6.8+** with the `xe` driver enabled.
-- **Intel Arc GPU** (e.g., B60, A770).
-- **Go 1.26+** (for building from source).
-- **Root Privileges:** Required to read metrics from `debugfs`.
-
-## Installation
-
-### 1. Build from source
-```bash
-make build
-sudo make install
-```
-
-### 2. Setup as a Service
-```bash
-sudo make setup-service
-```
+- **Linux Kernel 6.8+** with the `xe` driver loaded.
+- **Intel Arc GPU** (Battlemage B-series or Alchemist A-series).
+- **Go 1.26+** (build from source only).
 
 ## Configuration
 
-The exporter is configured via `/etc/default/xe-exporter`.
-
-To modify options like the Prometheus port or OTLP endpoint:
-
-1. Edit `/etc/default/xe-exporter`:
-```bash
-# /etc/default/xe-exporter
-XE_EXPORTER_OPTS="-prom-port 9101 -otlp-endpoint my-otel-collector:4317"
-```
-
-2. Restart the service:
-```bash
-sudo systemctl restart xe-exporter
-```
-
-The following flags are available:
-- `-prom-port`: Port for Prometheus metrics (default: `9101`)
-- `-enable-prom`: Enable/disable Prometheus endpoint (default: `true`)
-- `-otlp-endpoint`: OTLP gRPC endpoint (e.g., `localhost:4317`)
-- `-debug`: Enable verbose collection logging (default: `false`)
+| Flag | Default | Description |
+|---|---|---|
+| `-prom-port` | `9101` | Prometheus `/metrics` port |
+| `-enable-prom` | `true` | Enable Prometheus endpoint |
+| `-otlp-endpoint` | _(none)_ | OTLP gRPC endpoint (e.g. `otel-collector:4317`) |
+| `-debug` | `false` | Verbose collection logging |
 
 ## Prometheus Configuration
 
-To scrape metrics from this exporter, add the following job to your `prometheus.yml`:
-
 ```yaml
 scrape_configs:
-  - job_name: 'xe-exporter'
+  - job_name: xe-exporter
     static_configs:
       - targets: ['localhost:9101']
     scrape_interval: 2s
 ```
 
-## OpenTelemetry Configuration (OTLP)
-
-If you prefer pushing metrics to an OTel Collector, enable the OTLP flag in the configuration file:
+## OpenTelemetry (OTLP push)
 
 ```bash
-# /etc/default/xe-exporter
-XE_EXPORTER_OPTS="-otlp-endpoint my-otel-collector:4317"
+docker run -d --name xe-exporter \
+  --device /dev/dri \
+  --cap-add SYS_ADMIN \
+  -v /sys/kernel/debug:/sys/kernel/debug:ro \
+  ghcr.io/nsaintot/xe-exporter:latest \
+  -enable-prom=false -otlp-endpoint otel-collector:4317
+```
+
+## Build from Source
+
+```bash
+git clone https://github.com/nsaintot/xe-exporter
+cd xe-exporter
+docker build -t xe-exporter .
 ```
 
 ## License
+
 MIT

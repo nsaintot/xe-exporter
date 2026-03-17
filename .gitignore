@@ -1,2 +1,3 @@
-xe-exporter
+# compiled binary at repo root (produced by `make` / `go build`)
+/xe-exporter
 RESEARCH.md

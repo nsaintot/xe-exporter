@@ -3,24 +3,45 @@ name: release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
-permissions:
-  contents: write
+# xpumanager package to install in CI runners (build + runtime stage of Docker).
+# Bump this env when a new xpumanager release should be used.
+env:
+  XPUM_DEB_URL: https://github.com/intel/xpumanager/releases/download/v1.3.6/xpumanager_1.3.6_20260206.143628.1004f6cb.u24.04_amd64.deb
 
 jobs:
+  # ── 1. GoReleaser: binary tarball + .deb package + GitHub Release notes ──────
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create GitHub Release + upload assets
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26' # Updated to requested version
+          go-version: "1.26"
           cache: true
+
+      # Extract only libxpum.so + headers from the deb without running dpkg -i.
+      # Full install fails because the deb depends on Intel GPU driver packages
+      # (level-zero, intel-gsc, etc.) that are not in the default apt repos.
+      # dpkg-deb --extract unpacks the file tree without touching the dpkg DB
+      # or requiring any Depends: to be satisfied.
+      - name: Install xpumanager (CGo dependency)
+        run: |
+          curl -fsSL -o /tmp/xpumanager.deb "${{ env.XPUM_DEB_URL }}"
+          dpkg-deb --extract /tmp/xpumanager.deb /tmp/xpum
+          sudo cp -P /tmp/xpum/usr/lib/x86_64-linux-gnu/libxpum.so* /usr/lib/x86_64-linux-gnu/
+          sudo cp    /tmp/xpum/usr/include/xpum*.h /usr/include/
+          rm -rf /tmp/xpum /tmp/xpumanager.deb
+          sudo ldconfig
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -29,3 +50,59 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-I/usr/include"
+          CGO_LDFLAGS: "-L/usr/lib/x86_64-linux-gnu -lxpum -Wl,-rpath,/usr/lib/x86_64-linux-gnu -Wl,--allow-shlib-undefined"
+
+  # ── 2. Docker: build image and push to GHCR ──────────────────────────────────
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Generates OCI-compliant tags and labels from the git tag:
+      #   ghcr.io/owner/xe-exporter:1.2.3
+      #   ghcr.io/owner/xe-exporter:1.2
+      #   ghcr.io/owner/xe-exporter:1
+      #   ghcr.io/owner/xe-exporter:latest
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=xe-exporter
+            org.opencontainers.image.description=Intel Xe GPU Prometheus / OTLP exporter (libxpum CGo)
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            XPUM_DEB_URL=${{ env.XPUM_DEB_URL }}
+          # Layer cache via GitHub Actions cache backend (free, no registry needed)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

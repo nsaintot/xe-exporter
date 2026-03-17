@@ -7,13 +7,18 @@ before:
 
 builds:
   - env:
-      - CGO_ENABLED=0
-      - GOAMD64=v1 # Ensure compatibility with older CPUs (v1 is the default, but explicit is better)
+      # CGo is required: the provider links against libxpum.so at runtime.
+      # The CI runner must have xpumanager installed before GoReleaser runs
+      # (see .github/workflows/release.yml – "Install xpumanager" step).
+      - CGO_ENABLED=1
+      - CGO_CFLAGS=-I/usr/include
+      - CGO_LDFLAGS=-L/usr/lib/x86_64-linux-gnu -lxpum -Wl,-rpath,/usr/lib/x86_64-linux-gnu -Wl,--allow-shlib-undefined
+      - GOAMD64=v1 # Ensure compatibility with older CPUs
     goos:
       - linux
     goarch:
       - amd64
-    main: ./main.go
+    main: ./cmd/xe-exporter/main.go
     binary: xe-exporter
 
 archives:
@@ -24,7 +29,6 @@ archives:
     files:
       - README.md
       - LICENSE*
-      - xe-exporter.service
       - grafana/*.json
 
 checksum:
@@ -50,13 +54,4 @@ nfpms:
     formats:
       - deb
     bindir: /usr/local/bin
-    contents:
-      - src: xe-exporter.service
-        dst: /lib/systemd/system/xe-exporter.service
-      - src: xe-exporter.default
-        dst: /etc/default/xe-exporter
-        type: config
-    scripts:
-      postinstall: scripts/postinstall.sh
-      preremove: scripts/preremove.sh
-      postremove: scripts/postremove.sh
+    contents: []
