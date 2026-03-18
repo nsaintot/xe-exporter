@@ -304,10 +304,16 @@ func (c *Collector) Register(ctx context.Context) error {
 			start := time.Now()
 			devices, err := c.provider.Devices(ctx)
 			if err != nil {
-				if c.debug {
-					log.Printf("xpumanager provider error: %v", err)
-				}
-				return nil
+				// Always log collection errors so operators can diagnose stale data.
+				// Do NOT return early: when Devices() returns a non-nil error it
+				// also returns the last-good cached snapshot.  If we skip all
+				// observations, the OTel Prometheus bridge retains its previous
+				// gauge values indefinitely (they appear "frozen").  Serving
+				// stale-but-labeled data is far more transparent than silent staleness.
+				log.Printf("xpumanager: collection error (serving stale cache): %v", err)
+			}
+			if len(devices) == 0 {
+				return nil // nothing to observe — first collection not complete yet
 			}
 
 			for _, d := range devices {

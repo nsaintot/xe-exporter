@@ -24,12 +24,43 @@ import (
 )
 
 func main() {
-	promPort := flag.String("prom-port", "9101", "Prometheus metrics port")
-	enableProm := flag.Bool("enable-prom", true, "Enable Prometheus /metrics endpoint")
+	// ── Flags ──────────────────────────────────────────────────────────────────
+
+	// Internal flag — used by the subprocess spawned on each collect-interval tick.
+	// Do not set this manually; use -daemon-collector-mode to control collection behaviour.
+	collectOnce := flag.Bool("collect-once", false,
+		"(Internal) Run one collection cycle, write JSON to stdout, and exit.")
+
+	promPort     := flag.String("prom-port", "9101", "Prometheus metrics port")
+	enableProm   := flag.Bool("enable-prom", true, "Enable Prometheus /metrics endpoint")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP gRPC endpoint (e.g. localhost:4317)")
-	debug := flag.Bool("debug", false, "Enable verbose collection logging")
+	debug        := flag.Bool("debug", false, "Enable verbose collection logging")
+	collectInterval := flag.Duration("collect-interval", 10*time.Second,
+		"How often to collect a fresh GPU snapshot.\n"+
+			"Keep this ≥ your Prometheus scrape_interval.\n"+
+			"In the default mode the GPU idles completely between cycles.")
+	daemonCollectorMode := flag.Bool("daemon-collector-mode", false,
+		"Run hardware-counter collection in-process instead of spawning a subprocess.\n"+
+			"By default xe-exporter spawns a short-lived subprocess on each collect-interval\n"+
+			"tick so that all Level Zero handles are released by the OS on exit, allowing\n"+
+			"the GPU to power-gate between cycles.\n"+
+			"Enable this flag to revert to the single-process model (legacy behaviour).\n"+
+			"Warning: in daemon mode L0 handles remain open and the GPU thermal floor\n"+
+			"rises by ~12 °C regardless of collect-interval.")
 	flag.Parse()
 
+	// ── Subprocess entry point ─────────────────────────────────────────────────
+	// When -collect-once is set this is a short-lived worker spawned by the
+	// parent server.  It runs one full init→baseline→warmup→collect→shutdown
+	// cycle, writes the result as JSON to stdout, and exits.
+	if *collectOnce {
+		if err := xpumanager.RunCollectOnce(*debug); err != nil {
+			log.Fatalf("xe-exporter: collect-once failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// ── Long-lived server mode ─────────────────────────────────────────────────
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -78,8 +109,8 @@ func main() {
 
 	var meter metric.Meter = meterProvider.Meter("xe-exporter")
 
-	// ── GPU provider (libxpum CGo) ────────────────────────────────────────────
-	gpuProvider, err := xpumanager.NewProvider(*debug)
+	// ── GPU provider ──────────────────────────────────────────────────────────
+	gpuProvider, err := xpumanager.NewProvider(ctx, *debug, *collectInterval, *daemonCollectorMode)
 	if err != nil {
 		log.Fatalf("failed to initialise xpumanager: %v", err)
 	}
@@ -118,6 +149,11 @@ func main() {
 		}()
 	}
 
+	if *daemonCollectorMode {
+		log.Printf("xe-exporter: collect-interval=%s mode=daemon (L0 handles held in-process)", *collectInterval)
+	} else {
+		log.Printf("xe-exporter: collect-interval=%s mode=subprocess (GPU idles between cycles)", *collectInterval)
+	}
 	<-ctx.Done()
 	log.Println("xe-exporter: shutting down")
 }

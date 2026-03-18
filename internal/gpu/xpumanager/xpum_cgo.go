@@ -245,7 +245,10 @@ type cStatEntry struct {
 type cEngineEntry struct {
 	EngineType  int32   // xpum_engine_type_t value
 	EngineIndex int64   // engine index within its type
-	Value       float64 // utilisation %
+	Value       float64 // warmup-window mean utilisation % (= RawValue / RawScale)
+	RawValue    uint64  // raw avg from XPUM over the warmup window — for diagnostics
+	RawCur      uint64  // raw value of the last ~100 ms snapshot — for diagnostics only
+	RawScale    uint32  // scale divisor reported by XPUM — for diagnostics
 }
 
 // cFabricEntry holds one decoded Xe-Link throughput entry.
@@ -278,6 +281,13 @@ const (
 	statRasNonCompUncorr = int32(C.XPUM_STATS_RAS_ERROR_CAT_NON_COMPUTE_ERRORS_UNCORRECTABLE)
 	statMemTempC         = int32(C.XPUM_STATS_MEMORY_TEMPERATURE)
 	statMediaFrequency   = int32(C.XPUM_STATS_MEDIA_ENGINE_FREQUENCY)
+
+	// Engine-group aggregate utilisation — available from xpumGetStats (not xpumGetEngineStats).
+	// Used as fallback when xpumGetEngineStats is unsupported by the driver/GPU.
+	statEngineGroupCompute = int32(C.XPUM_STATS_ENGINE_GROUP_COMPUTE_ALL_UTILIZATION)
+	statEngineGroupMedia   = int32(C.XPUM_STATS_ENGINE_GROUP_MEDIA_ALL_UTILIZATION)
+	statEngineGroupCopy    = int32(C.XPUM_STATS_ENGINE_GROUP_COPY_ALL_UTILIZATION)
+	statEngineGroupRender  = int32(C.XPUM_STATS_ENGINE_GROUP_RENDER_ALL_UTILIZATION)
 
 	engineTypeCompute = int32(C.XPUM_ENGINE_TYPE_COMPUTE)
 	engineTypeRender  = int32(C.XPUM_ENGINE_TYPE_RENDER)
@@ -328,8 +338,15 @@ func cGetDeviceList() ([]cDeviceBasicInfo, error) {
 }
 
 // cGetStats returns device-level (non-tile) stat entries for deviceID.
-// sessionId=0 uses XPUM's default sampling window.
-func cGetStats(deviceID int32) ([]cStatEntry, error) {
+//
+// sessionID is the XPUM session identifier used for delta tracking.
+// Always pass 0: it is the only session ID that survives xpumShutdown/
+// xpumInit cycles.  The caller must issue a baseline call (results discarded)
+// before the warmup sleep to re-anchor the delta window start; see collect().
+//
+// beginNs and endNs are the XPUM-reported measurement window boundaries
+// (raw uint64 units from the driver — useful for diagnostics / --debug logs).
+func cGetStats(deviceID int32, sessionID uint64) (entries []cStatEntry, beginNs uint64, endNs uint64, err error) {
 	var buf [maxStatEntriesCap]C.xpum_device_stats_t
 	count := C.uint32_t(maxStatEntriesCap)
 	var begin, end C.uint64_t
@@ -338,9 +355,9 @@ func cGetStats(deviceID int32) ([]cStatEntry, error) {
 		C.xpum_device_id_t(deviceID),
 		&buf[0], &count,
 		&begin, &end,
-		0,
+		C.uint64_t(sessionID),
 	); rc != C.XPUM_OK {
-		return nil, fmt.Errorf("xpumGetStats device=%d rc=%d", deviceID, int(rc))
+		return nil, 0, 0, fmt.Errorf("xpumGetStats device=%d rc=%d", deviceID, int(rc))
 	}
 
 	var out []cStatEntry
@@ -363,11 +380,15 @@ func cGetStats(deviceID int32) ([]cStatEntry, error) {
 			})
 		}
 	}
-	return out, nil
+	return out, uint64(begin), uint64(end), nil
 }
 
 // cGetEngineStats returns per-engine (non-tile) utilisation for deviceID.
-func cGetEngineStats(deviceID int32) ([]cEngineEntry, error) {
+// sessionID follows the same convention as cGetStats.
+// beginNs and endNs are the XPUM-reported measurement window boundaries —
+// returned here (rather than discarded) so callers can log the actual window
+// and verify whether the two-pass session anchoring is working as expected.
+func cGetEngineStats(deviceID int32, sessionID uint64) (entries []cEngineEntry, beginNs uint64, endNs uint64, err error) {
 	var buf [maxEnginesCap]C.xpum_device_engine_stats_t
 	count := C.uint32_t(maxEnginesCap)
 	var begin, end C.uint64_t
@@ -376,9 +397,9 @@ func cGetEngineStats(deviceID int32) ([]cEngineEntry, error) {
 		C.xpum_device_id_t(deviceID),
 		&buf[0], &count,
 		&begin, &end,
-		0,
+		C.uint64_t(sessionID),
 	); rc != C.XPUM_OK {
-		return nil, fmt.Errorf("xpumGetEngineStats device=%d rc=%d", deviceID, int(rc))
+		return nil, 0, 0, fmt.Errorf("xpumGetEngineStats device=%d rc=%d", deviceID, int(rc))
 	}
 
 	var out []cEngineEntry
@@ -390,15 +411,23 @@ func cGetEngineStats(deviceID int32) ([]cEngineEntry, error) {
 		out = append(out, cEngineEntry{
 			EngineType:  int32(C.xpum_engine_get_type(e)),
 			EngineIndex: int64(e.index),
-			Value:       float64(C.xpum_scaled(e.value, e.scale)),
+			// Use e.avg (arithmetic mean across the ~14 warmup-window samples) rather
+			// than e.value (last ~100 ms snapshot).  For bursty media workloads the
+			// GPU may be idle in the last 100 ms even under steady load, causing e.value
+			// to be 0 while e.avg correctly reflects the sustained utilisation.
+			Value:    float64(C.xpum_scaled(e.avg, e.scale)),
+			RawValue: uint64(e.avg),
+			RawCur:   uint64(e.value), // last ~100 ms snapshot — kept for --debug logs
+			RawScale: uint32(e.scale),
 		})
 	}
-	return out, nil
+	return out, uint64(begin), uint64(end), nil
 }
 
 // cGetFabricStats returns Xe-Link throughput entries for deviceID.
 // Returns an empty slice (no error) if Xe-Link is not available on the device.
-func cGetFabricStats(deviceID int32) ([]cFabricEntry, error) {
+// sessionID follows the same convention as cGetStats.
+func cGetFabricStats(deviceID int32, sessionID uint64) ([]cFabricEntry, error) {
 	var buf [maxFabricCap]C.xpum_device_fabric_throughput_stats_t
 	count := C.uint32_t(maxFabricCap)
 	var begin, end C.uint64_t
@@ -407,7 +436,7 @@ func cGetFabricStats(deviceID int32) ([]cFabricEntry, error) {
 		C.xpum_device_id_t(deviceID),
 		&buf[0], &count,
 		&begin, &end,
-		0,
+		C.uint64_t(sessionID),
 	)
 	// XPUM may return a non-OK code when Xe-Link is absent; treat as empty.
 	if rc != C.XPUM_OK {
